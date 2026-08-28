@@ -1,0 +1,66 @@
+# Model catalogue.
+#
+# Every field here is a ROUTING CONSTRAINT, not documentation:
+#   max_data_class -> sensitivity ceiling (regulated data cannot reach a
+#                     confidential-capped model)
+#   regions        -> data residency allowlist
+#   tags           -> matched against a policy's forbid_model_tags
+#   quality_prior  -> warm-start belief for the bandit, from published
+#                     benchmarks or an offline eval; replaced by live evidence
+#                     as pulls accumulate
+#
+# provider: mock  -> deterministic offline fakes that inject known failures, so
+#                    guardrails can be demonstrated against ground truth.
+# To use real models: set PROVIDER_MODE=openai_compat in .env, change provider
+# to openai_compat, and replace `name` with the real model id (e.g. gpt-4o-mini).
+
+models:
+  - name: tiny-fast
+    provider: mock
+    usd_per_1k_in: 0.00005
+    usd_per_1k_out: 0.00010
+    p50_latency_ms: 180
+    quality_prior: 0.55
+    max_data_class: internal
+    regions: [IN, EU, US]
+    tags: [cheap]
+
+  - name: mid-balanced
+    provider: mock
+    usd_per_1k_in: 0.00030
+    usd_per_1k_out: 0.00120
+    p50_latency_ms: 520
+    quality_prior: 0.74
+    max_data_class: confidential
+    regions: [IN, EU, US]
+    tags: [default]
+
+  - name: frontier-strong
+    provider: mock
+    usd_per_1k_in: 0.00300
+    usd_per_1k_out: 0.01500
+    p50_latency_ms: 1400
+    quality_prior: 0.91
+    max_data_class: regulated
+    regions: [IN, US]
+    tags: [premium]
+
+  # EU-resident option. Note it is NOT tagged no_dpa, which is why it survives
+  # the EU overlay's forbid list while frontier-strong is excluded by region.
+  - name: eu-resident-mid
+    provider: mock
+    usd_per_1k_in: 0.00040
+    usd_per_1k_out: 0.00150
+    p50_latency_ms: 600
+    quality_prior: 0.72
+    max_data_class: regulated
+    regions: [EU]
+    tags: [dpa_signed]
+
+# Lagrangian budget controller. lambda is the shadow price of a dollar: it rises
+# when spend runs ahead of pace and the router quietly prefers cheaper arms.
+# No hard cutoff, so there is never a cliff at the end of the window.
+budget:
+  weekly_usd: 400.0
+  window_hours: 168
+  lambda_lr: 0.05

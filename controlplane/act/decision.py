@@ -1,0 +1,169 @@
+"""The graded ladder: allow -> annotate -> repair -> escalate -> block.
+
+Four of the five rungs still deliver a usable answer. Only genuinely extreme
+risk reaches BLOCK. Blocking is the rung that destroys utility and teaches users
+to bypass the system, so it is the last resort, not the default.
+"""
+from __future__ import annotations
+
+import uuid
+from collections import deque
+
+from ..policy.engine import ResolvedPolicy, eval_hard_rules
+from ..schemas import Action, Completion, Decision, InterceptedRequest, RiskVector
+from .repair import auto_repair
+
+_ACTION_ORDER = [
+    Action.ALLOW,
+    Action.ANNOTATE,
+    Action.REPAIR,
+    Action.ESCALATE,
+    Action.BLOCK,
+]
+
+
+class AlertBudget:
+    """Directly targets the alert-fatigue failure mode named in the brief.
+
+    We cap the fraction of traffic that may be ESCALATED to a human in a rolling
+    window. When the cap is hit, borderline escalations are DOWNGRADED to repair,
+    while genuinely extreme risk (>= 0.9) always still surfaces.
+
+    BLOCK is deliberately NOT counted here. Blocking is automated and consumes no
+    reviewer attention, so throttling it under a reviewer-capacity budget would
+    release the highest-risk responses precisely when the system is busiest.
+
+    Net effect: reviewer attention becomes a MANAGED, BUDGETED RESOURCE spent on
+    the worst cases, instead of being spread thin until everyone ignores it.
+    """
+
+    def __init__(self, window: int = 200):
+        self.events: dict[str, deque] = {}
+        self.window = window
+
+    def observe(self, key: str, alerted: bool) -> None:
+        dq = self.events.setdefault(key, deque(maxlen=self.window))
+        dq.append(1 if alerted else 0)
+
+    def rate(self, key: str) -> float:
+        dq = self.events.get(key)
+        return (sum(dq) / len(dq)) if dq else 0.0
+
+    def reset(self) -> None:
+        self.events.clear()
+
+
+ALERTS = AlertBudget()
+
+
+def _from_ladder(ladder: list[dict], risk: float) -> tuple[Action, str]:
+    for rung in ladder:
+        if risk < float(rung["max_risk"]):
+            return Action(rung["action"]), f"risk<{rung['max_risk']}"
+    return Action.BLOCK, "ladder_exhausted"
+
+
+def decide(
+    req: InterceptedRequest,
+    comp: Completion,
+    rv: RiskVector,
+    pol: ResolvedPolicy,
+) -> Decision:
+    # 1) statistical ladder
+    action, why = _from_ladder(pol.ladder, rv.fused)
+
+    # 2) deterministic compliance rules can only INCREASE severity, never relax
+    #    it. A hard rule is a floor, not an override.
+    hard = eval_hard_rules(pol, comp.text, rv.per_dim)
+    if hard:
+        h_action, h_reason = hard
+        if _ACTION_ORDER.index(h_action) > _ACTION_ORDER.index(action):
+            action, why = h_action, h_reason
+
+    # 3) grounding abstention is fatal in regulated flows, tolerable elsewhere.
+    if pol.require_grounding and "grounding" in rv.abstained:
+        if _ACTION_ORDER.index(action) < _ACTION_ORDER.index(Action.ESCALATE):
+            action, why = Action.ESCALATE, "unverifiable_in_regulated_flow"
+
+    # 4) irreversible / agentic output never ships un-reviewed at medium risk.
+    #    This is the compounding-risk guard: the cost of being wrong is not
+    #    symmetric when the output triggers an action you cannot undo.
+    if (
+        req.is_agentic
+        and not req.reversible
+        and rv.fused > 0.35
+        and _ACTION_ORDER.index(action) < _ACTION_ORDER.index(Action.ESCALATE)
+    ):
+        action, why = Action.ESCALATE, "irreversible_action_guard"
+
+    # 5) alert budget: protect reviewer attention.
+    #
+    # Only ESCALATE spends reviewer attention -- it pages a human and mints a
+    # ticket. BLOCK is fully automated: nobody is notified, no queue grows. So a
+    # reviewer-CAPACITY budget must never reverse a BLOCK.
+    #
+    # Throttling BLOCK inverts the system's purpose. Because the budget is spent
+    # by earlier traffic, the responses arriving after exhaustion are the ones
+    # released -- and risk is not ordered in time, so those are as likely to be
+    # the worst cases as the mildest. Measured on 600 requests, this released 64
+    # support_bot responses that the ladder had decided to withhold, 
+    # including some at fused risk 0.83-0.89.
+    key = f"{req.tenant}:{req.use_case.value}"
+    consumes_reviewer = action == Action.ESCALATE
+    if (
+        consumes_reviewer
+        and rv.fused < 0.9
+        and ALERTS.rate(key) > pol.alert_budget
+    ):
+        action = Action.REPAIR
+        why += " | downgraded:alert_budget_exhausted"
+        consumes_reviewer = False
+    ALERTS.observe(key, consumes_reviewer)
+
+    # 6) materialise the action
+    dec = Decision(
+        action=action,
+        reason=why,
+        risk=rv.fused,
+        threshold_hit=why,
+        policy_version=pol.version,
+    )
+
+    if action == Action.ALLOW:
+        dec.repaired_text = comp.text
+        if pol.disclosure_required:
+            dec.repaired_text += (
+                "\n\n_This response was generated by an AI system and screened "
+                "automatically._"
+            )
+
+    elif action == Action.ANNOTATE:
+        dec.repaired_text = comp.text
+        dec.annotations = [f"{d}={v}" for d, v in rv.per_dim.items() if v > 0.25]
+        if rv.abstained:
+            dec.annotations.append("unverified: " + ",".join(rv.abstained))
+
+    elif action == Action.REPAIR:
+        dec.repaired_text, dec.annotations = auto_repair(
+            comp, rv, pol.disclosure_required
+        )
+
+    elif action == Action.ESCALATE:
+        # The reviewer sees the repaired draft; the END USER sees only a holding
+        # message. Never ship the risky text while it is under review.
+        _draft, notes = auto_repair(comp, rv, pol.disclosure_required)
+        dec.repaired_text = (
+            "This request needs a quick human review before I can share an "
+            "answer. A specialist has been notified."
+        )
+        dec.annotations = notes + ["held_for_review"]
+        dec.human_ticket = f"REV-{uuid.uuid4().hex[:8]}"
+
+    else:  # BLOCK
+        dec.repaired_text = (
+            "I can't provide this response because it failed our safety and "
+            "accuracy checks. Let me connect you with someone who can help."
+        )
+        dec.annotations = ["blocked"]
+
+    return dec

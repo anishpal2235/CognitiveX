@@ -1,0 +1,148 @@
+# ControlPlane.ai governance layer.
+#
+# Policy is DATA, not code. Three reasons this matters:
+#   1. Regulations differ by geography and industry and keep evolving, so rigid
+#      hard-coded rules age badly. This file is edited by a compliance owner and
+#      hot-reloaded via POST /v1/policy/reload -- no deploy.
+#   2. Every decision records the content hash of this file, so any past action
+#      can be replayed against the exact policy that produced it.
+#   3. Thresholds inside detector code cannot vary by use case. Here they can.
+#
+# Resolution order:  defaults <- use_case <- geo overlay <- data_class overlay
+version: "2026.08.1"
+
+defaults:
+  # Wall-clock budget for the WHOLE request. The check orchestrator gets
+  # whatever remains after generation, and hard-stops at that deadline.
+  latency_budget_ms: 2000
+
+  detectors: [pii, bias, grounding, selfconsistency, semantic_entropy, conversation]
+
+  # Fraction of traffic allowed to reach a human. Reviewer attention is a
+  # budgeted resource -- see AlertBudget in act/decision.py.
+  alert_budget: 0.12
+
+  # Bandit exploration is OFF unless a use case explicitly opts in.
+  allow_exploration: false
+
+  # Does an unverifiable claim block the response?
+  require_grounding: false
+
+  fusion:
+    # Per-dimension importance, TUNED FROM MEASURED DISCRIMINATION rather than
+    # from intuition. For each dimension we measured, over labelled traces:
+    #   discrim = (mean score on TRUE positives) - (mean score on FALSE alarms)
+    # That is the only column that matters: among responses we flagged, does this
+    # dimension actually separate genuinely-unsafe from safe? Measured (n=109):
+    #
+    #   grounding      +0.241   retrieval verification against source docs
+    #   bias           +0.098   high precision, fires 0.000 on safe text
+    #   privacy        +0.006   see the novelty fix in scripts/simulate.py
+    #   compounding    +0.003   derived from fused risk, so it re-counts it
+    #   hallucination  -0.007   fires ~0.77 on safe AND unsafe alike
+    #   cost           -0.137   not a harm signal at all
+    #
+    # hallucination is not broken -- it measures the wrong thing for this job.
+    # Sample disagreement is a MODEL-RELIABILITY signal, so it belongs in Route's
+    # reward, not in a per-response gate. Negative-discrim dimensions add risk
+    # without adding information, so they are muted rather than merely reduced.
+    weights:
+      grounding: 1.4        # promoted: the strongest evidence we have
+      privacy: 1.4          # regex + Luhn validation, high confidence
+      safety: 1.5
+      bias: 0.9
+      hallucination: 0.5    # demoted: reliability signal, not a safety label
+      compounding: 0.3      # near-muted: a symptom of fused risk, not an input
+      cost: 0.0             # efficiency signal. Mixing it into a score that is
+                            # calibrated against P(unsafe) corrupts calibration,
+                            # and cost must never censor a user.
+    # THE over/under-flagging knob, surfaced instead of buried in code.
+    # 0 = pure weighted mean (under-reacts to one catastrophic signal)
+    # 1 = pure max (over-flags on any single noisy detector)
+    # Lowered from 0.6 to 0.35. The max term ignores the
+    # weights above, so at 0.6 the least trustworthy detector was
+    # dictating 60% of every score.
+    max_weight: 0.35
+  # The graded ladder. Evaluated top-down: first rung whose max_risk exceeds the
+  # fused score wins. Four of five rungs still deliver an answer.
+  # LADDER RETUNED FROM THE MEASURED OPERATING CURVE. Boundaries are read off the
+  # operating curve, not guessed -- see apply_patches.py for the numbers.
+  # WITHHOLD BOUNDARY LOWERED to 0.50: no safe response in the
+  # labelled set scored >= 0.50, so withholding earlier costs 0 false alarms.
+  ladder:
+    - {action: allow,    max_risk: 0.15}
+    - {action: annotate, max_risk: 0.35}
+    - {action: repair,   max_risk: 0.50}
+    - {action: escalate, max_risk: 0.70}
+    - {action: block,    max_risk: 1.01}
+
+  # Deterministic compliance rules. They can only INCREASE severity, never relax
+  # the ladder. Cheap, explainable, and readable by a regulator.
+  hard_rules:
+    - id: no_pii_egress
+      when: "privacy >= 0.5"
+      action: repair
+    - id: no_legal_advice
+      when: "regex:(this constitutes legal advice|you should sue|guaranteed to win)"
+      action: escalate
+
+use_cases:
+  # Customer-facing: tight latency, low tolerance for visible weirdness, and the
+  # only flow allowed to explore -- it is high-volume and reversible.
+  support_bot:
+    latency_budget_ms: 800
+    alert_budget: 0.05
+    allow_exploration: true
+    detectors: [pii, bias, grounding, selfconsistency, conversation]
+    ladder:
+      - {action: allow,    max_risk: 0.12}
+      - {action: annotate, max_risk: 0.30}
+      - {action: repair,   max_risk: 0.55}
+      - {action: escalate, max_risk: 0.75}
+      - {action: block,    max_risk: 1.01}
+
+  # Internal copilot: employees tolerate a caveat far better than a block, and
+  # they have context to judge. Latency budget is generous.
+  internal_copilot:
+    latency_budget_ms: 2000
+    alert_budget: 1.0          # effectively uncapped: no external blast radius
+    allow_exploration: true
+
+  # Regulated decision support: batch-ish latency, every detector, grounding
+  # mandatory, and no exploration. Never experiment on a lending decision.
+  credit_decision:
+    latency_budget_ms: 8000
+    alert_budget: 1.0          # always allowed to pull a human
+    allow_exploration: false
+    require_grounding: true
+    detectors: [pii, bias, grounding, selfconsistency, semantic_entropy, conversation, judge]
+    ladder:
+      - {action: allow,    max_risk: 0.10}
+      - {action: annotate, max_risk: 0.28}
+      - {action: repair,   max_risk: 0.55}
+      - {action: escalate, max_risk: 0.80}
+      - {action: block,    max_risk: 1.01}
+
+# Geography changes the RULES, not just the wording.
+geo_overlays:
+  EU:
+    privacy_multiplier: 1.3          # GDPR: personal data weighs heavier
+    forbid_model_tags: [no_dpa]      # no processor without a signed DPA
+    disclosure_required: true        # AI Act transparency duty
+    detectors_add: [judge]
+  IN:
+    privacy_multiplier: 1.1          # DPDP Act
+  US:
+    privacy_multiplier: 1.0
+
+# Data sensitivity scales overall risk and can add detectors.
+data_class_overlays:
+  regulated:
+    risk_multiplier: 1.25
+    detectors_add: [judge, conversation]
+  confidential:
+    risk_multiplier: 1.1
+  internal:
+    risk_multiplier: 1.0
+  public:
+    risk_multiplier: 0.9

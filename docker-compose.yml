@@ -1,0 +1,31 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - cpdata:/var/lib/controlplane
+    restart: unless-stopped
+
+  console:
+    build: .
+    # Shares the same image and the same volume, so the console reads the
+    # gateway's trace store directly. SQLite runs in WAL mode, which keeps the
+    # dashboard readable while the gateway is writing.
+    command: >
+      streamlit run dashboard/app.py
+      --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - cpdata:/var/lib/controlplane
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  cpdata:

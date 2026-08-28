@@ -1,0 +1,7 @@
+use_case,geo,data_class,prompt,model,reward
+support_bot,IN,confidential,How long do refunds take?,tiny-fast,0.55
+support_bot,IN,confidential,How long do refunds take?,mid-balanced,0.78
+internal_copilot,IN,internal,Summarise the leave policy,tiny-fast,0.62
+internal_copilot,IN,internal,Summarise the leave policy,mid-balanced,0.74
+credit_decision,IN,regulated,Should we approve this application?,mid-balanced,0.45
+credit_decision,IN,regulated,Should we approve this application?,frontier-strong,0.88

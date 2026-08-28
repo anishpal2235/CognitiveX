@@ -1,0 +1,32 @@
+# Deliberately RANGES, not hard pins, so this installs cleanly on Python
+# 3.10 through 3.13. (numpy==1.26.x, for example, does not build on 3.13.)
+
+# --- API layer ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+
+# --- config + data ---
+PyYAML>=6.0,<7.0
+numpy>=1.26,<3.0
+scikit-learn>=1.4,<2.0      # TF-IDF fallback embedder (no model download)
+
+# --- providers ---
+httpx>=0.27,<1.0
+python-dotenv>=1.0,<2.0
+
+# --- governance console ---
+streamlit>=1.36,<2.0
+pandas>=2.1,<3.0
+altair>=5.3,<6.0
+
+# --- tests ---
+pytest>=8.0,<9.0
+pytest-asyncio>=0.23,<2.0
+
+# --- OPTIONAL: stronger semantic clustering -------------------------------
+# Uncomment for real sentence embeddings (~90MB download on first run, plus
+# torch). The system runs fine without it: check/performance.py degrades
+# gracefully to the scikit-learn TF-IDF backend.
+# sentence-transformers>=3.0,<6.0
