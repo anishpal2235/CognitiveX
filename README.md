@@ -1,4 +1,4 @@
-# 🛡️ ControlPlane.ai — Round 2 Prototype
+# ControlPlane.ai — Round 2 Prototype
 
 **A vendor-neutral governance layer that sits between any application and any foundation model.**
 
@@ -21,7 +21,7 @@ the routing layer**, so the system gets cheaper and safer the more it is used.
 
 ---
 
-## Quick start (60 seconds, no API key)
+## Quick start 
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
@@ -161,7 +161,7 @@ promise in a policy document.
 
 ## Running on your own server
 
-### Option A — systemd (recommended for a VM)
+### Option A — systemd 
 
 ```bash
 sudo mkdir -p /opt/controlplane /var/lib/controlplane
@@ -304,7 +304,7 @@ The brief invites reasonable assumptions; these are ours.
 - **Model access** API-only. We inspect the input/output layer, never model internals.
 - **Cost figures** illustrative catalogue prices, not a vendor quote. The savings number is a counterfactual: same traffic, re-priced at the most expensive model.
 
-## Known limitations (and the honest fix)
+## Known limitations
 
 | Limitation | Consequence | Fix |
 |---|---|---|
